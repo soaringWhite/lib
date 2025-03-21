@@ -2,7 +2,7 @@ from data_loader import DataLoader
 from factor_calculator import FactorCalculator
 from factor_analysis import FactorAnalysis
 
-def main(database_path, query='SELECT * FROM data', adjust_price=False, factor_col=None, save_dir='results'):
+def main(database_path, query='SELECT * FROM data', adjust_price=False, factor_col=None, save_dir='results', holding_days=5):
     """
     主函数
     :param database_path: SQLite 数据库文件路径
@@ -10,6 +10,7 @@ def main(database_path, query='SELECT * FROM data', adjust_price=False, factor_c
     :param adjust_price: 是否进行复权处理
     :param factor_col: 指定分析的因子列名（如果为 None，则分析所有因子）
     :param save_dir: 结果保存目录
+    :param holding_days: 持有天数（用于选择收益列）
     """
     # 加载数据
     data_loader = DataLoader(database_path)
@@ -25,9 +26,9 @@ def main(database_path, query='SELECT * FROM data', adjust_price=False, factor_c
 
         # 分析单个因子或所有因子
         if factor_col is not None:
-            factor_analysis.analyze_factor(factor_col, save_dir)
+            factor_analysis.analyze_daily_group(factor_col, holding_days=holding_days, save_dir=save_dir)
         else:
-            factor_analysis.analyze_all_factors(save_dir)
+            factor_analysis.analyze_all_factors(holding_days=holding_days, save_dir=save_dir)
     finally:
         # 关闭数据库连接
         data_loader.close()
@@ -39,6 +40,7 @@ if __name__ == "__main__":
     adjust_price = True  # 是否进行复权处理
     factor_col = None  # 指定分析的因子列名（如果为 None，则分析所有因子）
     save_dir = "E:\\show\\day"  # 结果保存目录
+    holding_days = 1  # 持有天数（支持动态调整）
 
     # 调用主函数
-    main(database_path, custom_query, adjust_price, factor_col, save_dir)
+    main(database_path, custom_query, adjust_price, factor_col, save_dir, holding_days)

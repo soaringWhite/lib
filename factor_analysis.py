@@ -8,127 +8,142 @@ import os
 # 设置 Matplotlib 的字体为 SimHei（黑体），支持中文显示
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 指定默认字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+from typing import Optional, Dict, Any
+
+
 
 class FactorAnalysis:
-    def __init__(self, factors_df, holding_days=1):
+    def __init__(self, factors_df: pd.DataFrame):
         """
-        初始化因子分析器
-        :param factors_df: 包含因子和收益的数据
-        :param holding_days: 持有天数
+        初始化因子分析类
+        :param factors_df: 包含因子和收益的 DataFrame
         """
         self.factors_df = factors_df
-        self.holding_days = holding_days
 
-    def select_factor(self, factor_col=None):
+    def daily_grouping(self, factor_col: str, q: int = 5) -> pd.DataFrame:
         """
-        选择分析的因子
-        :param factor_col: 因子列名，如果为 None 则分析所有因子
-        :return: 需要分析的因子列表
-        """
-        # 找到所有因子列（排除收益列和标识列）
-        factor_cols = [col for col in self.factors_df.columns
-                       if not col.startswith('returns_')
-                       and col not in ['code', 'date', 'group']]
-
-        if factor_col is not None:
-            if factor_col not in factor_cols:
-                raise KeyError(f"数据中缺少 '{factor_col}' 列，请检查因子名称。")
-            return [factor_col]
-        return factor_cols
-
-    def calculate_group_returns(self, factor_col):
-        """
-        计算指定因子的分组收益
+        每天按因子值分组
         :param factor_col: 因子列名
-        :return: 包含分组收益的 DataFrame
+        :param q: 分位数（组数）
+        :return: 分组后的 DataFrame
         """
-        # 按因子值分组
-        self.factors_df['group'] = pd.qcut(self.factors_df[factor_col], q=5, labels=range(1, 6))
+        def safe_qcut(x):
+            # 如果因子值唯一或数量不足，则均分为 q 组
+            if x.nunique() < q:
+                # 生成唯一的边界值
+                unique_values = np.sort(x.unique())
+                if len(unique_values) == 1:  # 如果所有值都相同
+                    return pd.Series(1, index=x.index)  # 所有值分到同一组
+                bins = np.linspace(unique_values.min(), unique_values.max(), q + 1)
+                bins = np.unique(bins)  # 确保边界值唯一
+                if len(bins) - 1 < q:  # 如果生成的区间少于 q 个
+                    return pd.Series(1, index=x.index)  # 所有值分到同一组
+                return pd.cut(x, bins=bins, labels=range(1, len(bins)), duplicates='drop')
+            return pd.qcut(x, q=q, labels=range(1, q + 1), duplicates='drop')
 
-        # 计算每组的平均收益
-        group_returns = self.factors_df.groupby('group', observed=False)[f'returns_{self.holding_days}d'].mean()
-        return group_returns
+        self.factors_df['group'] = self.factors_df.groupby('date')[factor_col].transform(safe_qcut)
+        return self.factors_df
 
-    def plot_group_returns(self, factor_col, save_path=None):
+    def calculate_daily_group_returns(self, factor_col: str, holding_days: int = 5) -> pd.DataFrame:
         """
-        绘制指定因子的每组平均收益柱状图
+        计算每天每组的平均收益
         :param factor_col: 因子列名
+        :param holding_days: 持有天数（用于选择收益列）
+        :return: 每天的每组平均收益
+        """
+        # 动态生成收益列名
+        returns_col = f'returns_{holding_days}d'
+
+        # 如果数据中不存在指定收益列，则动态生成（假设 close 列存在）
+        if returns_col not in self.factors_df.columns:
+            if 'close' in self.factors_df.columns:
+                self.factors_df[returns_col] = self.factors_df.groupby('code')['close'].pct_change(periods=holding_days) * 100
+            else:
+                raise ValueError(f"未找到收益列 '{returns_col}'，且无法动态生成，请确保数据中存在 'close' 列。")
+
+        # 每天按因子值分组
+        self.daily_grouping(factor_col)
+
+        # 计算每天每组的平均收益
+        daily_group_returns = self.factors_df.groupby(['date', 'group'], observed=False)[returns_col].mean().reset_index()
+        return daily_group_returns
+
+    def calculate_cumulative_returns(self, daily_group_returns: pd.DataFrame, holding_days: int = 5) -> pd.DataFrame:
+        """
+        计算每组的累计收益（净值）
+        :param daily_group_returns: 每天的每组平均收益
+        :param holding_days: 持有天数（用于选择收益列）
+        :return: 每组的累计收益
+        """
+        # 动态生成收益列名
+        returns_col = f'returns_{holding_days}d'
+
+        # 计算累计收益
+        daily_group_returns['cumulative_returns'] = daily_group_returns.groupby('group')[returns_col].cumprod()
+
+        # 净值从 1 开始
+        daily_group_returns['cumulative_returns'] = daily_group_returns.groupby('group')['cumulative_returns'].transform(
+            lambda x: x / x.iloc[0] if x.iloc[0] != 0 else x
+        )
+        return daily_group_returns
+
+    def plot_cumulative_returns(self, cumulative_returns: pd.DataFrame, save_path: Optional[str] = None) -> None:
+        """
+        绘制净值曲线
+        :param cumulative_returns: 每组的累计收益
         :param save_path: 图像保存路径（如果为 None，则不保存）
         """
-        group_returns = self.calculate_group_returns(factor_col)
-
-        # 绘制柱状图
-        plt.figure(figsize=(10, 6))
-        sns.barplot(x=group_returns.index, y=group_returns.values)
-        plt.title(f"因子 {factor_col} 的每组平均收益")
-        plt.xlabel("组别")
-        plt.ylabel("平均收益")
-        if save_path is not None:
-            plt.savefig(save_path)  # 保存图像
-        plt.close()  # 关闭图像，避免内存泄漏
-
-    def plot_returns_over_time(self, factor_col, save_path=None):
-        """
-        绘制指定因子的每组收益随时间的变化图
-        :param factor_col: 因子列名
-        :param save_path: 图像保存路径（如果为 None，则不保存）
-        """
-        # 找到收益列的名称（列名以 'returns_' 开头）
-        returns_col = None
-        for col in self.factors_df.columns:
-            if col.startswith('returns_'):
-                returns_col = col
-                break
-
-        if returns_col is None:
-            raise KeyError("找不到收益列，请检查因子计算逻辑。")
-
-        # 检查 date 列是否存在
-        if 'date' not in self.factors_df.columns:
-            raise KeyError("数据中缺少 'date' 列，无法绘制收益随时间的变化。")
-
-        # 按因子值分组
-        self.factors_df['group'] = pd.qcut(self.factors_df[factor_col], q=5, labels=range(1, 6))
-
-        # 绘制收益随时间的变化
         plt.figure(figsize=(12, 6))
-        for group in sorted(self.factors_df['group'].unique()):
-            group_data = self.factors_df[self.factors_df['group'] == group]
-            group_data.groupby('date')[returns_col].mean().plot(label=f"组 {group}")
-        plt.title(f"因子 {factor_col} 的每组收益随时间的变化")
-        plt.xlabel("日期")
-        plt.ylabel("收益")
+        for group, data in cumulative_returns.groupby('group'):
+            plt.plot(data['date'], data['cumulative_returns'], label=f'Group {group}')
+        plt.title('Net Value Curve by Group')
+        plt.xlabel('Date')
+        plt.ylabel('Net Value')
         plt.legend()
-        if save_path is not None:
-            plt.savefig(save_path)  # 保存图像
-        plt.close()  # 关闭图像，避免内存泄漏
 
-    def analyze_factor(self, factor_col, save_dir=None):
+        if save_path:
+            plt.savefig(save_path)
+        else:
+            plt.close()  # 不显示图像，直接关闭
+
+    def analyze_daily_group(self, factor_col: str, holding_days: int = 5, q: int = 5, save_dir: Optional[str] = None) -> None:
         """
-        分析单个因子
+        每天按因子值分组，计算每组平均收益并生成净值曲线
         :param factor_col: 因子列名
+        :param holding_days: 持有天数（用于选择收益列）
+        :param q: 分位数（组数）
         :param save_dir: 结果保存目录（如果为 None，则不保存）
         """
-        if save_dir is not None:
+        # 计算每天每组的平均收益
+        daily_group_returns = self.calculate_daily_group_returns(factor_col, holding_days)
+
+        # 计算每组的累计收益
+        cumulative_returns = self.calculate_cumulative_returns(daily_group_returns, holding_days)
+
+        # 绘制净值曲线
+        if save_dir:
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
+            save_path = os.path.join(save_dir, f'{factor_col}_net_value_curve_{holding_days}d.png')
+            self.plot_cumulative_returns(cumulative_returns, save_path=save_path)
+        else:
+            self.plot_cumulative_returns(cumulative_returns)
 
-        # 保存分组收益数据
-        group_returns = self.calculate_group_returns(factor_col)
-        if save_dir is not None:
-            group_returns.to_csv(os.path.join(save_dir, f'{factor_col}_group_returns.csv'))
-
-        # 绘制并保存图像
-        self.plot_group_returns(factor_col, save_path=os.path.join(save_dir, f'{factor_col}_group_returns.png') if save_dir else None)
-        self.plot_returns_over_time(factor_col, save_path=os.path.join(save_dir, f'{factor_col}_returns_over_time.png') if save_dir else None)
-
-    def analyze_all_factors(self, save_dir=None):
+    def analyze_all_factors(self, holding_days: int = 5, save_dir: str = 'results') -> None:
         """
-        分析所有因子
-        :param save_dir: 结果保存目录（如果为 None，则不保存）
+        分析所有因子并保存结果
+        :param holding_days: 持有天数（用于选择收益列）
+        :param save_dir: 结果保存目录
         """
-        # 找到所有因子列
-        factor_cols = self.select_factor()
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
 
+        # 获取所有因子列（排除非因子列）
+        factor_cols = [col for col in self.factors_df.columns if col not in ['date', 'code', 'returns_5d', 'returns_1d']]
+
+        # 遍历所有因子并分析
         for factor_col in factor_cols:
-            self.analyze_factor(factor_col, save_dir)
+            self.analyze_daily_group(factor_col, holding_days=holding_days, save_dir=save_dir)
+
+
+
